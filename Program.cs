@@ -1,25 +1,35 @@
-using System.Collections;
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Threading;
 
 class DockerInspect
 {
     public string Architecture { get; set; } = string.Empty;
-    public string Os { get; set; } = string.Empty;
 }
 
 class Program
 {
-    static int Main(string[] args)
+    static int Main()
     {
-        GetDockerArch();
-        return 0;
+        return GetDockerArch() ? 0 : 1;
     }
 
-    static void GetDockerArch()
+    static bool GetDockerArch()
     {
         var dockerimages = GetDockerImages();
+        if (dockerimages == null)
+        {
+            return false;
+        }
+
+        var localarch = RuntimeInformation.OSArchitecture.ToString().ToLower();
+
+        Console.WriteLine($"Got docker images: {dockerimages.Length}");
+        Console.WriteLine($"Local arch: '{localarch}'");
 
         List<(string dockerimage, Process process)> inspectors = [];
         foreach (var d in dockerimages)
@@ -30,74 +40,75 @@ class Program
                 continue;
             }
 
-            Process p = new();
-            p.StartInfo.FileName = "docker";
-            p.StartInfo.Arguments = $"inspect {d}";
-            p.StartInfo.RedirectStandardOutput = true;
-            p.Start();
+            ProcessStartInfo startInfo = new("docker", $"inspect {d}") { RedirectStandardOutput = true };
+            var p = Process.Start(startInfo);
+            if (p == null)
+            {
+                Thread.Sleep(1000);
+                Console.WriteLine($"Failed to start: {startInfo.FileName} {startInfo.Arguments}");
+                return false;
+            }
             inspectors.Add((d, p));
         }
-
-        Process localarchprocess = new();
-        localarchprocess.StartInfo.FileName = "uname";
-        localarchprocess.StartInfo.Arguments = "-m";
-        localarchprocess.StartInfo.RedirectStandardOutput = true;
-        localarchprocess.Start();
-        localarchprocess.WaitForExit();
-        var localarch = localarchprocess.StandardOutput.ReadToEnd().TrimEnd();
-        Console.WriteLine($"Local arch: '{localarch}'");
 
         foreach (var (dockerimage, process) in inspectors)
         {
             process.WaitForExit();
+            if (process.ExitCode != 0)
+            {
+                Console.WriteLine($"Ignoring container image (1): '{dockerimage}'");
+                continue;
+            }
             var json = process.StandardOutput.ReadToEnd();
 
             var inspects = JsonSerializer.Deserialize<DockerInspect[]>(json);
             if (inspects == null)
             {
+                Console.WriteLine($"Ignoring container image (2): '{dockerimage}'");
                 continue;
             }
             if (inspects.Length != 1)
             {
-                Console.WriteLine($"Ignoring container image: '{dockerimage}'");
+                Console.WriteLine($"Ignoring container image (3): '{dockerimage}'");
                 continue;
             }
 
-            if (localarch == inspects[0].Architecture)
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-            }
+            Console.ForegroundColor = localarch == inspects[0].Architecture ? ConsoleColor.Green : ConsoleColor.Yellow;
 
             Console.WriteLine($"{dockerimage} {inspects[0].Architecture}");
         }
 
         Console.ResetColor();
+        return true;
     }
 
-    static string[] GetDockerImages()
+    static string[]? GetDockerImages()
     {
-        Process p = new();
-        p.StartInfo.FileName = "docker";
-        p.StartInfo.Arguments = "images";
-        p.StartInfo.RedirectStandardOutput = true;
-        p.Start();
+        ProcessStartInfo startInfo = new("docker", "images") { RedirectStandardOutput = true };
+        var p = Process.Start(startInfo);
+        if (p == null)
+        {
+            Thread.Sleep(1000);
+            Console.WriteLine($"Failed to start: {startInfo.FileName} {startInfo.Arguments}");
+            return null;
+        }
         p.WaitForExit();
+        if (p.ExitCode != 0)
+        {
+            Console.WriteLine($"Failed to start ({p.ExitCode}): {startInfo.FileName} {startInfo.Arguments}");
+            return null;
+        }
         var output = p.StandardOutput.ReadToEnd();
         List<string> outputlines = [.. output.Split('\n')];
-        Console.WriteLine($"Got {outputlines.Count} lines.");
-        outputlines.RemoveAll(l => l.StartsWith("REPOSITORY") || l == string.Empty);
+        _ = outputlines.RemoveAll(l => l.StartsWith("REPOSITORY") || l == string.Empty);
         outputlines = [.. outputlines.OrderBy(l => l)];
         List<string> dockerimages = [];
         foreach (var l in outputlines)
         {
-            int i1 = 0;
-            int i2 = 0;
-            int i3 = 0;
-            for (var i = 0; i < l.Length; i++)
+            var i1 = 0;
+            var i2 = 0;
+            var i3 = 0;
+            for (var i = 0; i < l.Length && i3 == 0; i++)
             {
                 if (i1 == 0)
                 {
@@ -115,14 +126,9 @@ class Program
                     }
                     continue;
                 }
-                if (i3 == 0)
+                if (l[i] == ' ')
                 {
-                    if (l[i] == ' ')
-                    {
-                        i3 = i;
-                        break;
-                    }
-                    continue;
+                    i3 = i;
                 }
             }
             if (i1 != 0 && i2 != 0 && i3 != 0)
